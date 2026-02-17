@@ -1,178 +1,351 @@
 import Foundation
-import SwiftUI
 import UIKit
+import CoreText
 
 final class PDFExportService {
 
+    enum ExportError: Error {
+        case unableToWritePDF
+    }
+
+    // MARK: - Public
+
     func exportReceiptPDF(receipt: Receipt) throws -> URL {
-        let view = ReceiptPDFView(receipt: receipt)
-        return try renderSwiftUIPDF(view: view, filename: "Receipt-\(receipt.id).pdf")
+        let url = makeTempURL(filename: safeFilename("Receipt-\(receipt.merchantName ?? "Receipt")-\(receipt.createdAt.ISO8601Short).pdf"))
+
+        let renderer = UIGraphicsPDFRenderer(bounds: pageRect, format: pdfFormat())
+        let data = renderer.pdfData { ctx in
+            ctx.beginPage()
+            fillWhiteBackground(ctx)
+
+            var y = margin
+
+            y = drawTitle("Receipt", in: ctx, y: y)
+            y = drawSubtitle(receipt.merchantName ?? "Receipt", in: ctx, y: y)
+            y = drawMetaLine("Date: \(receipt.createdAt.formatted(date: .abbreviated, time: .shortened))", in: ctx, y: y)
+            y += 10
+            y = drawDivider(in: ctx, y: y)
+
+            // Items
+            y += 10
+            y = drawSectionHeader("Items", in: ctx, y: y)
+
+            for item in receipt.items {
+                y = ensureSpace(ctx, y: y, needed: 52)
+
+                let assigned = assignedNames(for: item, receipt: receipt)
+                y = drawRow(left: item.name, right: item.amount.formatted(), in: ctx, y: y, boldRight: true)
+                y = drawSmall(assigned, in: ctx, y: y + 2)
+                y += 10
+                y = drawLightDivider(in: ctx, y: y)
+                y += 6
+            }
+
+            // Totals
+            y += 10
+            y = ensureSpace(ctx, y: y, needed: 140)
+            y = drawSectionHeader("Totals", in: ctx, y: y)
+
+            let itemsSum = receipt.computedItemsSum
+            let tax = receipt.tax ?? .zero
+            let tip = receipt.tip ?? .zero
+            let total = receipt.total ?? (itemsSum + tax + tip)
+
+            y = drawRow(left: "Items sum", right: itemsSum.formatted(), in: ctx, y: y)
+            y = drawRow(left: "Tax + Fees", right: tax.formatted(), in: ctx, y: y)
+            y = drawRow(left: "Tip", right: tip.formatted(), in: ctx, y: y)
+            y = drawDivider(in: ctx, y: y + 6)
+            y += 12
+            _ = drawRow(left: "Total", right: total.formatted(), in: ctx, y: y, boldLeft: true, boldRight: true)
+        }
+
+        try data.write(to: url, options: .atomic)
+        return url
     }
 
     func exportPeoplePDF(receipt: Receipt) throws -> URL {
-        let view = PeoplePDFView(receipt: receipt)
-        return try renderSwiftUIPDF(view: view, filename: "People-\(receipt.id).pdf")
-    }
+        let url = makeTempURL(filename: safeFilename("PeopleTotals-\(receipt.merchantName ?? "Receipt")-\(receipt.createdAt.ISO8601Short).pdf"))
 
-    private func renderSwiftUIPDF<V: View>(view: V, filename: String) throws -> URL {
-        let pageRect = CGRect(x: 0, y: 0, width: 612, height: 792) // US Letter
+        let result = PeopleTotalsCalculator.compute(for: receipt)
 
-        let renderer = UIGraphicsPDFRenderer(bounds: pageRect)
+        let renderer = UIGraphicsPDFRenderer(bounds: pageRect, format: pdfFormat())
         let data = renderer.pdfData { ctx in
             ctx.beginPage()
+            fillWhiteBackground(ctx)
 
-            let host = UIHostingController(rootView: view)
-            host.view.bounds = CGRect(x: 0, y: 0, width: pageRect.width, height: pageRect.height)
-            host.view.backgroundColor = .white
+            var y = margin
 
-            host.view.layer.render(in: ctx.cgContext)
+            y = drawTitle("Totals by Person", in: ctx, y: y)
+            y = drawSubtitle(receipt.merchantName ?? "Receipt", in: ctx, y: y)
+            y = drawMetaLine("Date: \(receipt.createdAt.formatted(date: .abbreviated, time: .shortened))", in: ctx, y: y)
+            y += 10
+            y = drawDivider(in: ctx, y: y)
+
+            if !receipt.isFullyAssigned {
+                y += 10
+                y = drawWarning("Some items are unassigned. Totals may be incomplete.", in: ctx, y: y)
+                y += 6
+                y = drawLightDivider(in: ctx, y: y)
+            }
+
+            for row in result.rows {
+                y += 12
+                y = ensureSpace(ctx, y: y, needed: 130)
+
+                y = drawSectionHeader(row.name, in: ctx, y: y)
+
+                if row.items.isEmpty {
+                    y = drawSmall("No assigned items", in: ctx, y: y + 6)
+                    y += 10
+                } else {
+                    y += 6
+                    for line in row.items {
+                        y = ensureSpace(ctx, y: y, needed: 18)
+                        y = drawBody(line, in: ctx, y: y)
+                        y += 2
+                    }
+                    y += 6
+                }
+
+                y = drawLightDivider(in: ctx, y: y)
+                y += 8
+
+                y = drawRow(left: "Subtotal", right: row.subtotal.formatted(), in: ctx, y: y)
+                y = drawRow(left: "Tax + Fees share", right: row.taxShare.formatted(), in: ctx, y: y)
+                y = drawRow(left: "Tip share", right: row.tipShare.formatted(), in: ctx, y: y)
+                y = drawRow(left: "Total", right: row.total.formatted(), in: ctx, y: y, boldLeft: true, boldRight: true)
+                y += 10
+            }
+
+            // Summary
+            y += 14
+            y = ensureSpace(ctx, y: y, needed: 190)
+            y = drawDivider(in: ctx, y: y)
+            y += 10
+            y = drawSectionHeader("Summary", in: ctx, y: y)
+
+            let itemsSum = receipt.computedItemsSum
+            let tax = receipt.tax ?? .zero
+            let tip = receipt.tip ?? .zero
+            let receiptTotal = receipt.total ?? (itemsSum + tax + tip)
+
+            y = drawRow(left: "Sum of people totals", right: result.sumTotals.formatted(), in: ctx, y: y)
+            y = drawRow(left: "Receipt total", right: receiptTotal.formatted(), in: ctx, y: y)
+
+            if result.unallocatedTotal.cents != 0 {
+                y += 8
+                y = drawLightDivider(in: ctx, y: y)
+                y += 10
+                y = drawSectionHeader("Unallocated", in: ctx, y: y)
+                y = drawSmall("(from unassigned items; should be $0.00 when fully assigned)", in: ctx, y: y + 2)
+                y += 10
+
+                y = drawRow(left: "Unallocated subtotal", right: result.unallocatedSubtotal.formatted(), in: ctx, y: y)
+                y = drawRow(left: "Unallocated tax + fees", right: result.unallocatedTax.formatted(), in: ctx, y: y)
+                y = drawRow(left: "Unallocated tip", right: result.unallocatedTip.formatted(), in: ctx, y: y)
+                _ = drawRow(left: "Unallocated total", right: result.unallocatedTotal.formatted(), in: ctx, y: y, boldLeft: true, boldRight: true)
+            }
         }
 
-        let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-        let url = dir.appendingPathComponent(filename)
-        try data.write(to: url, options: [.atomic])
+        try data.write(to: url, options: .atomic)
         return url
     }
-}
 
-// MARK: - PDF SwiftUI layouts
+    // MARK: - Page + layout
 
-private struct ReceiptPDFView: View {
-    let receipt: Receipt
+    private let pageRect = CGRect(x: 0, y: 0, width: 612, height: 792) // US Letter @ 72 dpi
+    private let margin: CGFloat = 36
+    private var contentWidth: CGFloat { pageRect.width - 2 * margin }
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(receipt.merchantName ?? "Receipt")
-                .font(.system(size: 22, weight: .bold))
-            Text(receipt.createdAt.formatted(date: .abbreviated, time: .shortened))
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-
-            Divider()
-
-            VStack(spacing: 8) {
-                ForEach(receipt.items) { item in
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Text(item.name)
-                                .font(.system(size: 12))
-                            Spacer()
-                            Text(item.amount.formatted())
-                                .font(.system(size: 12, design: .monospaced))
-                        }
-                        Text(assignedNames(for: item))
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-
-            Divider()
-            totals
-            Spacer()
-        }
-        .padding(28)
-        .frame(width: 612, height: 792)
-        .background(Color.white)
+    private func pdfFormat() -> UIGraphicsPDFRendererFormat {
+        let f = UIGraphicsPDFRendererFormat()
+        f.documentInfo = [
+            kCGPDFContextCreator as String: "ReceiptAnalyzer",
+            kCGPDFContextAuthor as String: "ReceiptAnalyzer"
+        ]
+        return f
     }
 
-    private var totals: some View {
-        let st = receipt.subtotal ?? receipt.computedItemsSum
-        let tax = receipt.tax ?? .zero
-        let tip = receipt.tip ?? .zero
-
-        return VStack(alignment: .leading, spacing: 6) {
-            row("Subtotal", st.formatted())
-            if receipt.tax != nil { row("Tax", tax.formatted()) }
-            if receipt.tip != nil { row("Tip", tip.formatted()) }
-            if let total = receipt.total { row("Total", total.formatted(), bold: true) }
-        }
-        .padding(.top, 6)
+    private func fillWhiteBackground(_ ctx: UIGraphicsPDFRendererContext) {
+        ctx.cgContext.setFillColor(UIColor.white.cgColor)
+        ctx.cgContext.fill(pageRect)
     }
 
-    private func row(_ l: String, _ r: String, bold: Bool = false) -> some View {
-        HStack {
-            Text(l).font(.system(size: 12))
-            Spacer()
-            Text(r)
-                .font(.system(size: 12, weight: bold ? .semibold : .regular, design: .monospaced))
+    private func ensureSpace(_ ctx: UIGraphicsPDFRendererContext, y: CGFloat, needed: CGFloat) -> CGFloat {
+        if y + needed > pageRect.height - margin {
+            ctx.beginPage()
+            fillWhiteBackground(ctx)
+            return margin
         }
+        return y
     }
 
-    private func assignedNames(for item: ReceiptItem) -> String {
+    // MARK: - Fixed PDF colors (never dynamic)
+
+    private let pdfBlack = UIColor.black
+    private let pdfGray = UIColor.darkGray
+    private let pdfLightGray = UIColor.lightGray
+
+    // MARK: - Text drawing helpers
+
+    @discardableResult
+    private func drawTitle(_ text: String, in ctx: UIGraphicsPDFRendererContext, y: CGFloat) -> CGFloat {
+        draw(text, font: .boldSystemFont(ofSize: 24), color: pdfBlack, in: ctx, y: y)
+    }
+
+    @discardableResult
+    private func drawSubtitle(_ text: String, in ctx: UIGraphicsPDFRendererContext, y: CGFloat) -> CGFloat {
+        draw(text, font: .systemFont(ofSize: 16, weight: .semibold), color: pdfBlack, in: ctx, y: y + 6)
+    }
+
+    @discardableResult
+    private func drawMetaLine(_ text: String, in ctx: UIGraphicsPDFRendererContext, y: CGFloat) -> CGFloat {
+        draw(text, font: .systemFont(ofSize: 12), color: pdfGray, in: ctx, y: y + 6)
+    }
+
+    @discardableResult
+    private func drawSectionHeader(_ text: String, in ctx: UIGraphicsPDFRendererContext, y: CGFloat) -> CGFloat {
+        draw(text, font: .systemFont(ofSize: 14, weight: .bold), color: pdfBlack, in: ctx, y: y)
+    }
+
+    @discardableResult
+    private func drawBody(_ text: String, in ctx: UIGraphicsPDFRendererContext, y: CGFloat) -> CGFloat {
+        draw(text, font: .systemFont(ofSize: 12), color: pdfBlack, in: ctx, y: y)
+    }
+
+    @discardableResult
+    private func drawSmall(_ text: String, in ctx: UIGraphicsPDFRendererContext, y: CGFloat) -> CGFloat {
+        draw(text, font: .systemFont(ofSize: 11), color: pdfGray, in: ctx, y: y)
+    }
+
+    @discardableResult
+    private func drawWarning(_ text: String, in ctx: UIGraphicsPDFRendererContext, y: CGFloat) -> CGFloat {
+        // Still print-friendly: black text (no orange)
+        draw(text, font: .systemFont(ofSize: 12, weight: .semibold), color: pdfBlack, in: ctx, y: y)
+    }
+
+    @discardableResult
+    private func drawRow(left: String,
+                         right: String,
+                         in ctx: UIGraphicsPDFRendererContext,
+                         y: CGFloat,
+                         boldLeft: Bool = false,
+                         boldRight: Bool = false) -> CGFloat {
+
+        let leftFont: UIFont = boldLeft ? .systemFont(ofSize: 12, weight: .semibold) : .systemFont(ofSize: 12)
+        let rightFont: UIFont = boldRight ? .systemFont(ofSize: 12, weight: .semibold) : .systemFont(ofSize: 12)
+
+        let leftHeight = draw(left,
+                              font: leftFont,
+                              color: pdfBlack,
+                              rect: CGRect(x: margin, y: y, width: contentWidth * 0.68, height: 10_000),
+                              in: ctx)
+
+        let rightHeight = draw(right,
+                               font: rightFont,
+                               color: pdfBlack,
+                               alignment: .right,
+                               rect: CGRect(x: margin + contentWidth * 0.70, y: y, width: contentWidth * 0.30, height: 10_000),
+                               in: ctx)
+
+        return y + max(leftHeight, rightHeight) + 6
+    }
+
+    @discardableResult
+    private func drawDivider(in ctx: UIGraphicsPDFRendererContext, y: CGFloat) -> CGFloat {
+        let p = UIBezierPath()
+        p.move(to: CGPoint(x: margin, y: y))
+        p.addLine(to: CGPoint(x: pageRect.width - margin, y: y))
+        pdfLightGray.setStroke()
+        p.lineWidth = 1
+        p.stroke()
+        return y + 1
+    }
+
+    @discardableResult
+    private func drawLightDivider(in ctx: UIGraphicsPDFRendererContext, y: CGFloat) -> CGFloat {
+        let p = UIBezierPath()
+        p.move(to: CGPoint(x: margin, y: y))
+        p.addLine(to: CGPoint(x: pageRect.width - margin, y: y))
+        pdfLightGray.withAlphaComponent(0.5).setStroke()
+        p.lineWidth = 0.8
+        p.stroke()
+        return y + 1
+    }
+
+    @discardableResult
+    private func draw(_ text: String,
+                      font: UIFont,
+                      color: UIColor,
+                      in ctx: UIGraphicsPDFRendererContext,
+                      y: CGFloat) -> CGFloat {
+        let rect = CGRect(x: margin, y: y, width: contentWidth, height: 10_000)
+        let h = draw(text, font: font, color: color, rect: rect, in: ctx)
+        return y + h
+    }
+
+    private func draw(_ text: String,
+                      font: UIFont,
+                      color: UIColor,
+                      alignment: NSTextAlignment = .left,
+                      rect: CGRect,
+                      in ctx: UIGraphicsPDFRendererContext) -> CGFloat {
+
+        let para = NSMutableParagraphStyle()
+        para.alignment = alignment
+        para.lineBreakMode = .byWordWrapping
+
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: color,
+            .paragraphStyle: para
+        ]
+
+        let str = NSAttributedString(string: text, attributes: attrs)
+        let framesetter = CTFramesetterCreateWithAttributedString(str)
+
+        let targetSize = CGSize(width: rect.width, height: rect.height)
+        let suggested = CTFramesetterSuggestFrameSizeWithConstraints(
+            framesetter,
+            CFRange(location: 0, length: str.length),
+            nil,
+            targetSize,
+            nil
+        )
+
+        let drawRect = CGRect(x: rect.minX, y: rect.minY, width: rect.width, height: ceil(suggested.height))
+        str.draw(with: drawRect, options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil)
+        return ceil(suggested.height)
+    }
+
+    // MARK: - Assigned names
+
+    private func assignedNames(for item: ReceiptItem, receipt: Receipt) -> String {
         let ids = receipt.assignments[item.id] ?? []
         if ids.isEmpty { return "Unassigned" }
-        let names = ids.compactMap { id in receipt.participants.first(where: { $0.id == id })?.name }
+        let names = ids.compactMap { id in
+            receipt.participants.first(where: { $0.id == id })?.name
+        }
         return "Assigned to: " + names.joined(separator: ", ")
+    }
+
+    // MARK: - File URLs
+
+    private func makeTempURL(filename: String) -> URL {
+        FileManager.default.temporaryDirectory.appendingPathComponent(filename)
+    }
+
+    private func safeFilename(_ s: String) -> String {
+        let invalid = CharacterSet(charactersIn: "/\\?%*|\"<>:")
+        return s.components(separatedBy: invalid).joined(separator: "-")
     }
 }
 
-private struct PeoplePDFView: View {
-    let receipt: Receipt
-
-    var body: some View {
-        let r = PeopleTotalsCalculator.compute(for: receipt)
-
-        VStack(alignment: .leading, spacing: 12) {
-            Text("People Totals")
-                .font(.system(size: 22, weight: .bold))
-            Text(receipt.merchantName ?? "")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-
-            Divider()
-
-            ForEach(r.rows) { p in
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(p.name)
-                        .font(.system(size: 14, weight: .semibold))
-
-                    ForEach(p.items, id: \.self) { line in
-                        Text("• \(line)")
-                            .font(.system(size: 11))
-                    }
-
-                    HStack { Text("Subtotal").font(.system(size: 11)); Spacer()
-                        Text(p.subtotal.formatted()).font(.system(size: 11, design: .monospaced))
-                    }
-                    HStack { Text("Tax").font(.system(size: 11)); Spacer()
-                        Text(p.taxShare.formatted()).font(.system(size: 11, design: .monospaced))
-                    }
-                    HStack { Text("Tip").font(.system(size: 11)); Spacer()
-                        Text(p.tipShare.formatted()).font(.system(size: 11, design: .monospaced))
-                    }
-                    HStack { Text("Total").font(.system(size: 12, weight: .semibold)); Spacer()
-                        Text(p.total.formatted()).font(.system(size: 12, weight: .semibold, design: .monospaced))
-                    }
-
-                    Divider()
-                }
-            }
-
-            Spacer()
-
-            // Key point: we do NOT “force” totals to match if items are unassigned.
-            HStack {
-                Text("Sum of assigned totals").font(.system(size: 12))
-                Spacer()
-                Text(r.sumTotals.formatted()).font(.system(size: 12, design: .monospaced))
-            }
-            if let receiptTotal = receipt.total {
-                HStack {
-                    Text("Receipt total").font(.system(size: 12))
-                    Spacer()
-                    Text(receiptTotal.formatted()).font(.system(size: 12, design: .monospaced))
-                }
-            }
-
-            if r.unallocatedTotal.cents > 0 {
-                Text("Unallocated (unassigned items / tax / tip): \(r.unallocatedTotal.formatted())")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .padding(28)
-        .frame(width: 612, height: 792)
-        .background(Color.white)
+private extension Date {
+    var ISO8601Short: String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd_HH-mm"
+        return f.string(from: self)
     }
 }
