@@ -12,7 +12,7 @@ struct PastReceiptsView: View {
                         ReceiptDetailView(receiptID: receipt.id)
                     } label: {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text(receipt.merchantName ?? "Receipt")
+                            Text(receipt.resolvedName)
                                 .font(.headline)
                                 .foregroundColor(.white)
 

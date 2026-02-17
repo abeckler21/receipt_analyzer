@@ -48,5 +48,14 @@ final class ReceiptStore: ObservableObject {
             // For a production app: surface an error banner/log
         }
     }
+    
+    func renameReceipt(id: UUID, newName: String) {
+        guard let idx = receipts.firstIndex(where: { $0.id == id }) else { return }
+
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        receipts[idx].displayName = trimmed.isEmpty ? nil : trimmed
+
+        save()
+    }
 }
 
