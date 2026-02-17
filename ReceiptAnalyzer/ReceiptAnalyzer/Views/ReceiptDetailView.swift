@@ -9,11 +9,11 @@ struct ReceiptDetailView: View {
     @State private var shareURL: URL?
     @State private var shareShowing = false
 
-    // ✅ Rename UI
+    // Rename UI
     @State private var renameShowing = false
     @State private var renameDraft: String = ""
 
-    // ✅ Derived, not stored in @State (prevents navigation glitches)
+    // Derived, not stored in @State (prevents navigation glitches)
     private var receipt: Receipt? {
         store.receipts.first(where: { $0.id == receiptID })
     }
@@ -60,7 +60,7 @@ struct ReceiptDetailView: View {
                 .toolbar {
                     ToolbarItemGroup(placement: .topBarTrailing) {
 
-                        // ✅ Rename receipt (pencil)
+                        // Rename receipt (pencil)
                         Button {
                             renameDraft = receipt.displayName ?? receipt.merchantName ?? ""
                             renameShowing = true

@@ -6,7 +6,7 @@ struct Receipt: Identifiable, Codable, Equatable {
 
     var merchantName: String?
 
-    // ✅ User-editable override (persisted)
+    // User-editable override (persisted)
     var displayName: String? = nil
 
     var rawText: String = ""
@@ -33,7 +33,7 @@ struct Receipt: Identifiable, Codable, Equatable {
         items.allSatisfy { (assignments[$0.id] ?? []).isEmpty == false }
     }
 
-    /// ✅ What to show in UI:
+    /// What to show in UI:
     /// displayName (if set) else merchantName else "Receipt"
     var resolvedName: String {
         let dn = (displayName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
